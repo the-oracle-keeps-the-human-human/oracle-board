@@ -111,10 +111,11 @@ interface Env {
   DISCORD_WEBHOOK_URL?: string;
 }
 
-async function handleGitHubWebhook(request: Request, env: Env): Promise<Response> {
+async function handleGitHubWebhook(request: Request, env: Env, slug?: string): Promise<Response> {
   const event = request.headers.get("X-GitHub-Event") || "unknown";
   const payload = await request.json() as any;
   const ts = new Date().toISOString();
+  const date = ts.slice(0, 10);
 
   const summary = {
     ts,
@@ -127,10 +128,16 @@ async function handleGitHubWebhook(request: Request, env: Env): Promise<Response
     ref: payload.ref || null,
     commits: payload.commits?.length || null,
     url: payload.pull_request?.html_url || payload.issue?.html_url || payload.compare || null,
+    workshop: slug || null,
+    date,
   };
 
   if (env.WEBHOOK_EVENTS) {
-    await env.WEBHOOK_EVENTS.put(`event:${ts}`, JSON.stringify(summary), { expirationTtl: 86400 * 7 });
+    await env.WEBHOOK_EVENTS.put(`event:${ts}`, JSON.stringify(summary), { expirationTtl: 86400 * 30 });
+    if (slug) {
+      await env.WEBHOOK_EVENTS.put(`ws:${slug}:${ts}`, JSON.stringify(summary), { expirationTtl: 86400 * 30 });
+    }
+    await env.WEBHOOK_EVENTS.put(`date:${date}:${ts}`, JSON.stringify(summary), { expirationTtl: 86400 * 30 });
   }
 
   if (env.DISCORD_WEBHOOK_URL) {
@@ -149,16 +156,16 @@ async function handleGitHubWebhook(request: Request, env: Env): Promise<Response
   });
 }
 
-async function handleWebhookFeed(env: Env): Promise<Response> {
+async function handleWebhookFeed(env: Env, prefix = "event:"): Promise<Response> {
   if (!env.WEBHOOK_EVENTS) {
     return new Response(JSON.stringify({ events: [], note: "KV not bound" }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  const list = await env.WEBHOOK_EVENTS.list({ prefix: "event:", limit: 50 });
+  const list = await env.WEBHOOK_EVENTS.list({ prefix, limit: 50 });
   const events = await Promise.all(
-    list.keys.map(async (k) => {
+    list.keys.map(async (k: any) => {
       const val = await env.WEBHOOK_EVENTS!.get(k.name);
       return val ? JSON.parse(val) : null;
     })
@@ -173,13 +180,24 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    if (url.pathname === "/github-hooks" && request.method === "POST") {
-      return handleGitHubWebhook(request, env);
+    // POST /github-hooks — global
+    // POST /workshop/<slug>/github-hooks — workshop-scoped
+    if (request.method === "POST") {
+      const wsMatch = url.pathname.match(/^\/workshop\/([^/]+)\/github-hooks$/);
+      if (wsMatch) return handleGitHubWebhook(request, env, wsMatch[1]);
+      if (url.pathname === "/github-hooks") return handleGitHubWebhook(request, env);
     }
 
-    if (url.pathname === "/api/feed") {
-      return handleWebhookFeed(env);
-    }
+    // GET /api/feed — all events
+    if (url.pathname === "/api/feed") return handleWebhookFeed(env);
+
+    // GET /workshop/<slug>/feed — events for a workshop
+    const wsFeedMatch = url.pathname.match(/^\/workshop\/([^/]+)\/feed$/);
+    if (wsFeedMatch) return handleWebhookFeed(env, `ws:${wsFeedMatch[1]}:`);
+
+    // GET /date/<YYYY-MM-DD>/feed — events for a date
+    const dateFeedMatch = url.pathname.match(/^\/date\/(\d{4}-\d{2}-\d{2})\/feed$/);
+    if (dateFeedMatch) return handleWebhookFeed(env, `date:${dateFeedMatch[1]}:`);
 
     const [events, issues, repos] = await Promise.all([
       fetchGitHub(`/orgs/${ORG}/events?per_page=30`),
