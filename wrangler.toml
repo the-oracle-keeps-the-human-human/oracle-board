@@ -1,6 +1,7 @@
 name = "oracle-board"
 main = "src/worker.ts"
 compatibility_date = "2025-06-01"
+account_id = "a5eabdc2b11aae9bd5af46bd6a88179e"
 
 [observability]
 enabled = true
