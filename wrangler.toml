@@ -3,5 +3,9 @@ main = "src/worker.ts"
 compatibility_date = "2025-06-01"
 account_id = "a5eabdc2b11aae9bd5af46bd6a88179e"
 
+[[kv_namespaces]]
+binding = "WEBHOOK_EVENTS"
+id = "5b76c3c54f3940af997849d6787a5c68"
+
 [observability]
 enabled = true

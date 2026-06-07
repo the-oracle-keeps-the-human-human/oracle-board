@@ -106,8 +106,81 @@ footer { text-align:center; padding:2rem; color:#8b949e; font-size:0.8rem; borde
 </html>`;
 }
 
+interface Env {
+  WEBHOOK_EVENTS?: KVNamespace;
+  DISCORD_WEBHOOK_URL?: string;
+}
+
+async function handleGitHubWebhook(request: Request, env: Env): Promise<Response> {
+  const event = request.headers.get("X-GitHub-Event") || "unknown";
+  const payload = await request.json() as any;
+  const ts = new Date().toISOString();
+
+  const summary = {
+    ts,
+    event,
+    action: payload.action || null,
+    repo: payload.repository?.full_name || null,
+    sender: payload.sender?.login || null,
+    title: payload.pull_request?.title || payload.issue?.title || null,
+    number: payload.pull_request?.number || payload.issue?.number || null,
+    ref: payload.ref || null,
+    commits: payload.commits?.length || null,
+    url: payload.pull_request?.html_url || payload.issue?.html_url || payload.compare || null,
+  };
+
+  if (env.WEBHOOK_EVENTS) {
+    await env.WEBHOOK_EVENTS.put(`event:${ts}`, JSON.stringify(summary), { expirationTtl: 86400 * 7 });
+  }
+
+  if (env.DISCORD_WEBHOOK_URL) {
+    const icon = eventIcon(event === "push" ? "PushEvent" : event === "pull_request" ? "PullRequestEvent" : event === "issues" ? "IssuesEvent" : "IssueCommentEvent");
+    const repo = (summary.repo || "").replace(`${ORG}/`, "");
+    const msg = `${icon} **${summary.sender}** ${summary.action || event} ${summary.title ? `"${summary.title}"` : ""} in **${repo}**${summary.url ? ` — ${summary.url}` : ""}`;
+    await fetch(env.DISCORD_WEBHOOK_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: msg }),
+    });
+  }
+
+  return new Response(JSON.stringify({ ok: true, event, ts }), {
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+async function handleWebhookFeed(env: Env): Promise<Response> {
+  if (!env.WEBHOOK_EVENTS) {
+    return new Response(JSON.stringify({ events: [], note: "KV not bound" }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  const list = await env.WEBHOOK_EVENTS.list({ prefix: "event:", limit: 50 });
+  const events = await Promise.all(
+    list.keys.map(async (k) => {
+      const val = await env.WEBHOOK_EVENTS!.get(k.name);
+      return val ? JSON.parse(val) : null;
+    })
+  );
+
+  return new Response(JSON.stringify({ events: events.filter(Boolean).reverse() }), {
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+  });
+}
+
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/github-hooks" && request.method === "POST") {
+      return handleGitHubWebhook(request, env);
+    }
+
+    if (url.pathname === "/api/feed") {
+      return handleWebhookFeed(env);
+    }
+
     const [events, issues, repos] = await Promise.all([
       fetchGitHub(`/orgs/${ORG}/events?per_page=30`),
       fetchGitHub(`/search/issues?q=org:${ORG}+sort:created&per_page=15`).then((r: any) => r.items || []),
